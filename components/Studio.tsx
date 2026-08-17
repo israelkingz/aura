@@ -50,6 +50,7 @@ export function Studio() {
   const [error, setError] = useState<string | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
   const dressedFor = useRef<string | null>(null);
+  const tryOnSeq = useRef(0);
 
   useEffect(() => {
     fetch("/api/status")
@@ -65,13 +66,12 @@ export function Studio() {
 
   const eventBrief = useMemo(() => {
     if (!analysis) return null;
-    return briefEvent(
-      analysis.occasion,
-      analysis.scores,
-      analysis.looks[0],
-      analysis.skips[0],
+    const wear = selected ?? analysis.looks[0];
+    const skip = analysis.skips.find(
+      (item) => item.garment.id !== wear?.garment.id,
     );
-  }, [analysis]);
+    return briefEvent(analysis.occasion, analysis.scores, wear, skip);
+  }, [analysis, selected]);
 
   const occasionLabel =
     OCCASIONS.find((item) => item.id === occasion)?.label ?? occasion;
@@ -83,6 +83,8 @@ export function Studio() {
       return;
     }
     setSelected(look);
+    const seq = ++tryOnSeq.current;
+    const key = `${look.garment.id}:${body.preview}`;
     setBusy(true);
     setError(null);
     try {
@@ -94,13 +96,15 @@ export function Studio() {
         resultUrl?: string;
         error?: string;
       };
+      if (seq !== tryOnSeq.current) return;
       if (!res.ok) throw new Error(json.error || "Try-on failed");
       setTryOnUrl(json.resultUrl ?? null);
-      dressedFor.current = `${look.garment.id}:${body.preview}`;
+      dressedFor.current = key;
     } catch (err) {
+      if (seq !== tryOnSeq.current) return;
       setError(err instanceof Error ? err.message : "Try-on failed");
     } finally {
-      setBusy(false);
+      if (seq === tryOnSeq.current) setBusy(false);
     }
   };
 
@@ -397,6 +401,9 @@ function ResultsPanel({
 }) {
   const focus = readings.filter((item) => item.band === "focus").slice(0, 3);
   const rest = readings.filter((item) => item.band !== "focus").slice(0, 4);
+  const refused = analysis.skips.find(
+    (item) => item.garment.id !== selected?.garment.id,
+  );
 
   return (
     <div className="space-y-8">
@@ -466,8 +473,8 @@ function ResultsPanel({
           <li className="rounded-xl bg-black/25 px-3 py-3">
             <span className="text-white/40">2 · Refuse</span>
             <p className="mt-1">
-              {analysis.skips[0]
-                ? `Skip ${analysis.skips[0].garment.name}. ${analysis.skips[0].reasons[0]}`
+              {refused
+                ? `Skip ${refused.garment.name}. ${refused.reasons[0]}`
                 : "Nothing is a hard skip. We still pick the quietest match for the room."}
             </p>
           </li>

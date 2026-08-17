@@ -152,8 +152,13 @@ export function recommendLooks(scores: SkinScores, occasion: OccasionId) {
   ).sort((a, b) => b.score - a.score);
 
   const looks = ranked.filter((item) => item.verdict !== "skip").slice(0, 3);
-  const skips = ranked.filter((item) => item.verdict === "skip").slice(0, 2);
-  if (!looks.length && ranked[0]) looks.push(ranked[0]);
+  if (!looks.length && ranked[0]) {
+    looks.push({ ...ranked[0], verdict: "maybe" });
+  }
+  const worn = new Set(looks.map((item) => item.garment.id));
+  const skips = ranked
+    .filter((item) => item.verdict === "skip" && !worn.has(item.garment.id))
+    .slice(0, 2);
 
   return { looks, skips };
 }
