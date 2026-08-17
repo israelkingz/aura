@@ -3,13 +3,18 @@
 import { Capture } from "@/components/Capture";
 import { Gauge } from "@/components/Gauge";
 import { OCCASIONS } from "@/lib/catalog";
+import {
+  briefEvent,
+  interpretScores,
+  overallReading,
+  type SkinReading,
+} from "@/lib/interpret";
 import type {
   AnalyzeResponse,
   LookRecommendation,
   OccasionId,
-  SkinConcernScore,
 } from "@/lib/types";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Step =
   | "home"
@@ -44,6 +49,7 @@ export function Studio() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
+  const dressedFor = useRef<string | null>(null);
 
   useEffect(() => {
     fetch("/api/status")
@@ -52,12 +58,51 @@ export function Studio() {
       .catch(() => setLive(false));
   }, []);
 
-  const concerns = useMemo(() => {
-    if (!analysis) return [];
-    return Object.values(analysis.scores.concerns).sort(
-      (a, b) => a.uiScore - b.uiScore,
+  const readings = useMemo(
+    () => (analysis ? interpretScores(analysis.scores) : []),
+    [analysis],
+  );
+
+  const eventBrief = useMemo(() => {
+    if (!analysis) return null;
+    return briefEvent(
+      analysis.occasion,
+      analysis.scores,
+      analysis.looks[0],
+      analysis.skips[0],
     );
   }, [analysis]);
+
+  const occasionLabel =
+    OCCASIONS.find((item) => item.id === occasion)?.label ?? occasion;
+
+  const runTryOn = async (look: LookRecommendation) => {
+    if (!body) {
+      setSelected(look);
+      setStep("body");
+      return;
+    }
+    setSelected(look);
+    setBusy(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.set("body", body.file);
+      form.set("garmentId", look.garment.id);
+      const res = await fetch("/api/tryon", { method: "POST", body: form });
+      const json = (await res.json()) as {
+        resultUrl?: string;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(json.error || "Try-on failed");
+      setTryOnUrl(json.resultUrl ?? null);
+      dressedFor.current = `${look.garment.id}:${body.preview}`;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Try-on failed");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const runAnalyze = async () => {
     if (!face) return;
@@ -72,7 +117,10 @@ export function Studio() {
       const json = (await res.json()) as AnalyzeResponse & { error?: string };
       if (!res.ok) throw new Error(json.error || "Skin analysis failed");
       setAnalysis(json);
-      setSelected(json.looks[0] ?? null);
+      const top = json.looks[0] ?? null;
+      setSelected(top);
+      setTryOnUrl(null);
+      dressedFor.current = null;
       setStep("looks");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analysis failed");
@@ -82,33 +130,15 @@ export function Studio() {
     }
   };
 
-  const runTryOn = async (look: LookRecommendation) => {
-    if (!body) {
-      setSelected(look);
-      setStep("body");
-      return;
-    }
-    setSelected(look);
-    setBusy(true);
-    setError(null);
-    setStep("tryon");
-    try {
-      const form = new FormData();
-      form.set("body", body.file);
-      form.set("garmentId", look.garment.id);
-      const res = await fetch("/api/tryon", { method: "POST", body: form });
-      const json = (await res.json()) as {
-        resultUrl?: string;
-        error?: string;
-      };
-      if (!res.ok) throw new Error(json.error || "Try-on failed");
-      setTryOnUrl(json.resultUrl ?? null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Try-on failed");
-    } finally {
-      setBusy(false);
-    }
-  };
+  useEffect(() => {
+    if (step !== "looks" || !body || !selected) return;
+    const key = `${selected.garment.id}:${body.preview}`;
+    if (dressedFor.current === key) return;
+    dressedFor.current = key;
+    void runTryOn(selected);
+    // Dress the chosen look onto the body as soon as the scan lands.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, body, selected?.garment.id]);
 
   const total = selected
     ? selected.garment.price + (selected.care?.price ?? 0)
@@ -142,7 +172,7 @@ export function Studio() {
           <section className="space-y-6">
             <ol className="flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.14em] text-white/45">
               {(Object.keys(STEP_LABEL) as Step[])
-                .filter((item) => item !== "home")
+                .filter((item) => item !== "home" && item !== "tryon" && item !== "cart")
                 .map((item) => (
                   <li
                     key={item}
@@ -190,7 +220,8 @@ export function Studio() {
               <div className="space-y-4">
                 <h2 className="font-display text-4xl">Let Skin AI read the day.</h2>
                 <p className="text-white/60">
-                  YouCam Skin AI rejects a face that is too small in the frame. Sit close until chin-to-hairline fills the oval. Use http://localhost:3000 so the camera can start.
+                  Sit close until chin-to-hairline fills the oval. After this we take a
+                  shoulders shot so we can put the {occasionLabel.toLowerCase()} look on you.
                 </p>
                 <Capture
                   mode="face"
@@ -203,10 +234,10 @@ export function Studio() {
                     <img src={face.preview} alt="Selfie" className="h-16 w-16 rounded-full object-cover" />
                     <button
                       type="button"
-                      onClick={() => void runAnalyze()}
+                      onClick={() => setStep("body")}
                       className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-ink"
                     >
-                      Analyze my skin
+                      Next: body photo
                     </button>
                   </div>
                 ) : null}
@@ -215,22 +246,23 @@ export function Studio() {
 
             {step === "body" ? (
               <div className="space-y-4">
-                <h2 className="font-display text-4xl">Now the body YouCam VTO needs.</h2>
+                <h2 className="font-display text-4xl">Now the body the clothes go on.</h2>
                 <p className="text-white/60">
-                  Skin AI wants a close face. Clothes V3 wants shoulders and torso. Aura keeps them as two shots so both models get a clean input.
+                  Shoulders to hip, facing the camera. We scan the face, then dress this
+                  frame for your {occasionLabel.toLowerCase()}.
                 </p>
                 <Capture
                   mode="body"
                   onCapture={(file, preview) => setBody({ file, preview })}
                   onSkipFile={(file, preview) => setBody({ file, preview })}
                 />
-                {body && selected ? (
+                {body && face ? (
                   <button
                     type="button"
-                    onClick={() => void runTryOn(selected)}
+                    onClick={() => void runAnalyze()}
                     className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-ink"
                   >
-                    Render {selected.garment.name}
+                    Read my skin and dress me for {occasionLabel}
                   </button>
                 ) : null}
               </div>
@@ -238,47 +270,34 @@ export function Studio() {
 
             {step === "analyze" ? (
               <div className="glass rounded-3xl p-8">
-                <p className="pill">YouCam Skin Analysis</p>
-                <h2 className="mt-4 font-display text-4xl">Reading texture, flush, oil, moisture.</h2>
+                <p className="pill">YouCam Skin Analysis → cloth-v3</p>
+                <h2 className="mt-4 font-display text-4xl">
+                  Reading the face, then dressing you for {occasionLabel}.
+                </h2>
                 <p className="mt-3 text-white/60">
-                  Overlay masks and UI scores come back from the same dermatology-trained model used by 800+ beauty brands.
+                  Scores first, in words you can use. Then the keeper look is rendered on
+                  your body — not on a model.
                 </p>
               </div>
             ) : null}
 
-            {step === "looks" && analysis ? (
-              <LooksPanel
+            {step === "looks" && analysis && eventBrief ? (
+              <ResultsPanel
                 analysis={analysis}
-                concerns={concerns}
+                readings={readings}
+                eventBrief={eventBrief}
                 selected={selected}
+                hasBody={Boolean(body)}
+                dressing={busy}
                 onSelect={(look) => {
                   setSelected(look);
                   setTryOnUrl(null);
+                  dressedFor.current = null;
                 }}
-                onTry={(look) => void runTryOn(look)}
+                onDress={(look) => void runTryOn(look)}
+                onCart={() => setCartOpen(true)}
+                total={total}
               />
-            ) : null}
-
-            {step === "tryon" && selected ? (
-              <div className="space-y-4">
-                <p className="pill">YouCam Apparel VTO · cloth-v3</p>
-                <h2 className="font-display text-4xl">{selected.garment.name}</h2>
-                <p className="text-white/60">{selected.reasons[0]}</p>
-                <button
-                  type="button"
-                  onClick={() => setCartOpen(true)}
-                  className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-ink"
-                >
-                  Add look + care · ${total}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStep("looks")}
-                  className="ml-3 text-sm text-white/60"
-                >
-                  Back to looks
-                </button>
-              </div>
             ) : null}
           </section>
 
@@ -290,15 +309,11 @@ export function Studio() {
               tryOnUrl={tryOnUrl}
               busy={busy}
               step={step}
+              occasionLabel={occasionLabel}
             />
             {error ? (
               <p className="rounded-2xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
                 {error}
-              </p>
-            ) : null}
-            {analysis?.mode === "demo" ? (
-              <p className="text-xs leading-5 text-white/40">
-                Demo mode is on because `YOUCAM_API_KEY` is empty. Drop the key into `.env.local` after you redeem units and the same flow calls live Skin Analysis + cloth-v3.
               </p>
             ) : null}
           </aside>
@@ -306,11 +321,7 @@ export function Studio() {
       ) : null}
 
       {cartOpen && selected ? (
-        <Cart
-          look={selected}
-          total={total}
-          onClose={() => setCartOpen(false)}
-        />
+        <Cart look={selected} total={total} onClose={() => setCartOpen(false)} />
       ) : null}
     </div>
   );
@@ -331,9 +342,8 @@ function Home({
           Dress the skin you have today.
         </h1>
         <p className="mt-5 max-w-xl text-lg text-white/65">
-          Online fashion still sells you a model&apos;s complexion. Aura reads your
-          redness, oil, and texture with YouCam Skin AI, then refuses garments that
-          will clash — and renders the ones that won&apos;t with Apparel VTO.
+          Scores in plain words. Then the clothes go on your body for the room you
+          are actually walking into — interview, date, wedding, not a catalog.
         </p>
         <div className="mt-8 flex flex-wrap gap-3">
           <button
@@ -347,121 +357,203 @@ function Home({
             {live ? "Connected to YouCam" : "Works in demo until your key lands"}
           </span>
         </div>
-        <dl className="mt-12 grid grid-cols-3 gap-4 text-sm">
-          <div>
-            <dt className="text-white/40">Read</dt>
-            <dd>Skin Analysis scores + masks</dd>
-          </div>
-          <div>
-            <dt className="text-white/40">Reason</dt>
-            <dd>Wear / skip for this hour</dd>
-          </div>
-          <div>
-            <dt className="text-white/40">Render</dt>
-            <dd>cloth-v3 on your body</dd>
-          </div>
-        </dl>
       </div>
       <div className="glass relative overflow-hidden rounded-[32px] p-6 shadow-glow">
         <p className="text-[11px] uppercase tracking-[0.2em] text-white/45">
-          Today&apos;s skin state
+          In words, not just numbers
         </p>
-        <div className="mt-6 flex justify-around">
-          <Gauge label="Redness" value={48} accent="#fb7185" />
-          <Gauge label="Oiliness" value={52} accent="#fbbf24" />
-          <Gauge label="Radiance" value={71} accent="#5CB8FF" />
-        </div>
-        <div className="mt-8 rounded-2xl border border-white/10 bg-black/30 p-4">
-          <p className="text-sm text-rose-200">Skip · Magenta moto</p>
-          <p className="mt-1 text-sm text-white/55">
-            High-saturation leather will read as more flush while redness is 48.
-          </p>
-          <p className="mt-4 text-sm text-sky-200">Wear · Sage fine knit</p>
-          <p className="mt-1 text-sm text-white/55">
-            Cool, low-saturation knit. Add Barrier Calm Serum to the cart.
-          </p>
-        </div>
+        <p className="mt-4 font-display text-2xl">Visible flush today</p>
+        <p className="mt-2 text-sm text-white/60">
+          Redness 48. Hot pink will look like more flush, not more style. For an
+          interview we dress you in ivory or sage, on your body.
+        </p>
       </div>
     </section>
   );
 }
 
-function LooksPanel({
+function ResultsPanel({
   analysis,
-  concerns,
+  readings,
+  eventBrief,
   selected,
+  hasBody,
+  dressing,
   onSelect,
-  onTry,
+  onDress,
+  onCart,
+  total,
 }: {
   analysis: AnalyzeResponse;
-  concerns: SkinConcernScore[];
+  readings: SkinReading[];
+  eventBrief: ReturnType<typeof briefEvent>;
   selected: LookRecommendation | null;
+  hasBody: boolean;
+  dressing: boolean;
   onSelect: (look: LookRecommendation) => void;
-  onTry: (look: LookRecommendation) => void;
+  onDress: (look: LookRecommendation) => void;
+  onCart: () => void;
+  total: number;
 }) {
+  const focus = readings.filter((item) => item.band === "focus").slice(0, 3);
+  const rest = readings.filter((item) => item.band !== "focus").slice(0, 4);
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div>
-        <p className="pill">Skin report · {analysis.occasion}</p>
-        <h2 className="mt-3 font-display text-4xl">
-          Overall {analysis.scores.overall}
-          {analysis.scores.skinAge ? ` · skin age ${analysis.scores.skinAge}` : ""}
-        </h2>
+        <p className="pill">Skin report, in English</p>
+        <h2 className="mt-3 font-display text-4xl">What the scan actually means</h2>
+        <p className="mt-3 text-white/65">{overallReading(analysis.scores)}</p>
+        {analysis.scores.skinAge ? (
+          <p className="mt-2 text-sm text-white/45">
+            Skin age {analysis.scores.skinAge} — a YouCam estimate, not your birthday.
+          </p>
+        ) : null}
       </div>
+
       <div className="flex flex-wrap gap-4">
-        {concerns.slice(0, 6).map((item) => (
+        {readings.slice(0, 6).map((item) => (
           <Gauge
             key={item.key}
             label={item.label}
-            value={item.uiScore}
-            accent={item.uiScore < 60 ? "#fb7185" : "#5CB8FF"}
+            value={item.score}
+            accent={item.band === "focus" ? "#fb7185" : item.band === "watch" ? "#fbbf24" : "#5CB8FF"}
           />
         ))}
       </div>
+
       <div className="space-y-3">
-        <h3 className="text-sm uppercase tracking-[0.16em] text-white/45">Wear these</h3>
+        {(focus.length ? focus : readings.slice(0, 3)).map((item) => (
+          <article
+            key={item.key}
+            className="rounded-2xl border border-white/10 bg-white/5 p-4"
+          >
+            <div className="flex items-baseline justify-between gap-3">
+              <p className="font-medium">
+                {item.headline}{" "}
+                <span className="text-white/40">· {item.label} {item.score}</span>
+              </p>
+              <span className="text-[11px] uppercase tracking-[0.14em] text-white/40">
+                {item.band === "focus" ? "Dress around this" : item.band}
+              </span>
+            </div>
+            <p className="mt-2 text-sm text-white/65">{item.meaning}</p>
+            <p className="mt-2 text-sm text-sky-200/90">{item.forClothes}</p>
+          </article>
+        ))}
+      </div>
+
+      {rest.length && focus.length ? (
+        <p className="text-xs text-white/40">
+          Also fine today:{" "}
+          {rest.map((item) => `${item.label} ${item.score}`).join(" · ")}
+        </p>
+      ) : null}
+
+      <div className="glass rounded-3xl p-5">
+        <p className="pill">Mini demo · {eventBrief.label}</p>
+        <h3 className="mt-3 font-display text-3xl">
+          Walking into {eventBrief.label.toLowerCase()}
+        </h3>
+        <p className="mt-2 text-sm text-white/55">
+          {eventBrief.room}. {eventBrief.lighting}.
+        </p>
+        <ol className="mt-5 space-y-3 text-sm">
+          <li className="rounded-xl bg-black/25 px-3 py-3">
+            <span className="text-white/40">1 · Read</span>
+            <p className="mt-1">{readings[0]?.headline ?? "Skin state captured."} {readings[0]?.meaning}</p>
+          </li>
+          <li className="rounded-xl bg-black/25 px-3 py-3">
+            <span className="text-white/40">2 · Refuse</span>
+            <p className="mt-1">
+              {analysis.skips[0]
+                ? `Skip ${analysis.skips[0].garment.name}. ${analysis.skips[0].reasons[0]}`
+                : "Nothing is a hard skip. We still pick the quietest match for the room."}
+            </p>
+          </li>
+          <li className="rounded-xl bg-black/25 px-3 py-3">
+            <span className="text-white/40">3 · Dress you</span>
+            <p className="mt-1">{eventBrief.story}</p>
+          </li>
+        </ol>
+        {selected ? (
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => onDress(selected)}
+              disabled={dressing || !hasBody}
+              className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-ink disabled:opacity-40"
+            >
+              {dressing
+                ? "Putting the look on you…"
+                : hasBody
+                  ? `Put ${selected.garment.name} on my skin`
+                  : "Need a body photo first"}
+            </button>
+            <button
+              type="button"
+              onClick={onCart}
+              className="rounded-full border border-white/20 px-5 py-2.5 text-sm"
+            >
+              Add look + care · ${total}
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="space-y-3">
+        <h3 className="text-sm uppercase tracking-[0.16em] text-white/45">
+          Wear for {eventBrief.label.toLowerCase()}
+        </h3>
         {analysis.looks.map((look) => (
           <button
             key={look.garment.id}
             type="button"
             onClick={() => onSelect(look)}
-            className={`w-full rounded-2xl border p-4 text-left ${
+            className={`flex w-full gap-3 rounded-2xl border p-3 text-left ${
               selected?.garment.id === look.garment.id
                 ? "border-sky-300/50 bg-sky-300/10"
                 : "border-white/10 bg-white/5"
             }`}
           >
-            <div className="flex items-start justify-between gap-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={look.garment.image}
+              alt=""
+              className="h-16 w-16 rounded-xl object-cover"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">{look.garment.name}</p>
+              <p className="text-sm text-white/55">{look.reasons[0]}</p>
+            </div>
+            <span className="text-sm text-sky-200">{look.score}</span>
+          </button>
+        ))}
+      </div>
+
+      {analysis.skips.length ? (
+        <div className="space-y-3">
+          <h3 className="text-sm uppercase tracking-[0.16em] text-rose-200/80">
+            Do not wear these to {eventBrief.label.toLowerCase()}
+          </h3>
+          {analysis.skips.map((look) => (
+            <div
+              key={look.garment.id}
+              className="flex gap-3 rounded-2xl border border-rose-400/20 bg-rose-400/5 p-3"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={look.garment.image}
+                alt=""
+                className="h-16 w-16 rounded-xl object-cover"
+              />
               <div>
                 <p className="font-medium">{look.garment.name}</p>
                 <p className="text-sm text-white/55">{look.reasons[0]}</p>
               </div>
-              <span className="text-sm text-sky-200">{look.score}</span>
-            </div>
-          </button>
-        ))}
-      </div>
-      {analysis.skips.length ? (
-        <div className="space-y-3">
-          <h3 className="text-sm uppercase tracking-[0.16em] text-rose-200/80">
-            Do not wear these today
-          </h3>
-          {analysis.skips.map((look) => (
-            <div key={look.garment.id} className="rounded-2xl border border-rose-400/20 bg-rose-400/5 p-4">
-              <p className="font-medium">{look.garment.name}</p>
-              <p className="text-sm text-white/55">{look.reasons[0]}</p>
             </div>
           ))}
         </div>
-      ) : null}
-      {selected ? (
-        <button
-          type="button"
-          onClick={() => onTry(selected)}
-          className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-ink"
-        >
-          Try on {selected.garment.name}
-        </button>
       ) : null}
     </div>
   );
@@ -474,6 +566,7 @@ function Preview({
   tryOnUrl,
   busy,
   step,
+  occasionLabel,
 }: {
   face?: string;
   body?: string;
@@ -481,9 +574,11 @@ function Preview({
   tryOnUrl: string | null;
   busy: boolean;
   step: Step;
+  occasionLabel: string;
 }) {
   const demo = tryOnUrl?.startsWith("demo://");
-  const image = !demo && tryOnUrl ? tryOnUrl : body || face;
+  const liveTryOn = tryOnUrl && !demo ? tryOnUrl : null;
+  const image = liveTryOn || body || face;
 
   return (
     <div className="glass sticky top-6 overflow-hidden rounded-[28px]">
@@ -496,24 +591,41 @@ function Preview({
             Capture to fill the mirror
           </div>
         )}
-        {demo && selected ? (
-          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-4">
-            <p className="text-sm">Demo composite · {selected.garment.name}</p>
-            <p className="text-xs text-white/60">
-              Live cloth-v3 replaces this with YouCam&apos;s generated wear image.
-            </p>
+        {demo && selected && body ? (
+          <div className="absolute inset-0">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={body} alt="" className="h-full w-full object-cover" />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={selected.garment.image}
+              alt=""
+              className="absolute inset-x-[12%] bottom-[8%] top-[28%] object-contain opacity-90 mix-blend-normal"
+            />
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent p-4">
+              <p className="text-sm">Preview on you · {selected.garment.name}</p>
+              <p className="text-xs text-white/60">
+                Live cloth-v3 replaces this overlay with YouCam’s wear image.
+              </p>
+            </div>
           </div>
         ) : null}
         {busy ? (
           <div className="absolute inset-0 grid place-items-center bg-black/50 text-sm">
-            {step === "analyze" ? "Running Skin AI…" : "Rendering Apparel VTO…"}
+            {step === "analyze"
+              ? "Running Skin AI…"
+              : `Dressing you for ${occasionLabel}…`}
+          </div>
+        ) : null}
+        {liveTryOn && selected ? (
+          <div className="absolute left-3 top-3 rounded-full bg-black/55 px-3 py-1 text-[11px] uppercase tracking-[0.14em]">
+            On your skin · {occasionLabel}
           </div>
         ) : null}
       </div>
       {selected ? (
         <div className="border-t border-white/10 p-4">
           <p className="text-[11px] uppercase tracking-[0.16em] text-white/40">
-            Why this, on this face
+            Why this, on this face, for {occasionLabel}
           </p>
           <p className="mt-2 text-sm text-white/75">{selected.reasons[0]}</p>
         </div>

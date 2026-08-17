@@ -1,4 +1,5 @@
 import { CARE, GARMENTS } from "./catalog";
+import { occasionReason } from "./interpret";
 import { scoreOf } from "./parse-skin";
 import type {
   CareProduct,
@@ -133,7 +134,7 @@ function styleGarment(
     score >= 72 ? "wear" : score >= 52 ? "maybe" : "skip";
 
   if (!reasons.length) {
-    reasons.push("Neutral match for today's skin. Safe, not a statement.");
+    reasons.push(occasionReason(occasion, scores));
   }
 
   return {
@@ -150,8 +151,9 @@ export function recommendLooks(scores: SkinScores, occasion: OccasionId) {
     styleGarment(garment, scores, occasion),
   ).sort((a, b) => b.score - a.score);
 
-  const looks = ranked.filter((item) => item.verdict !== "skip").slice(0, 4);
+  const looks = ranked.filter((item) => item.verdict !== "skip").slice(0, 3);
   const skips = ranked.filter((item) => item.verdict === "skip").slice(0, 2);
+  if (!looks.length && ranked[0]) looks.push(ranked[0]);
 
   return { looks, skips };
 }
